@@ -111,8 +111,11 @@ def cal_overlaps(boxes1, boxes2):
     overlaps = np.zeros((boxes1.shape[0], boxes2.shape[0]))
 
     # calculate the intersection of  boxes1(anchor) and boxes2(GT box)
-    for i in range(boxes1.shape[0]):
-        overlaps[i][:] = cal_iou(boxes1[i], area1[i], boxes2, area2)
+    # for i in range(boxes1.shape[0]):
+    #     overlaps[i][:] = cal_iou(boxes1[i], area1[i], boxes2, area2)
+
+    for i in range(boxes2.shape[0]):
+        overlaps[:,i] = cal_iou(boxes2[i], area2[i], boxes1, area1)
 
     return overlaps
 
@@ -179,6 +182,14 @@ def filter_bbox(bbox, minsize):
 
 
 def cal_rpn(imgsize, featuresize, scale, gtboxes):
+    if gtboxes.shape[0] == 0:
+        base_anchor = gen_anchor(featuresize, scale)
+
+        labels = np.empty(base_anchor.shape[0])
+        labels.fill(-1)
+        bbox_targets = np.zeros([base_anchor.shape[0],2])
+        return [labels,bbox_targets], base_anchor
+
     imgh, imgw = imgsize
 
     # gen base anchor
@@ -280,16 +291,22 @@ def shrink_poly(poly, r=16):
     end = int((x_max // 16) * 16)
 
     p = x_min
-    res.append([p, int(k1 * p + b1),
-                start - 1, int(k1 * (p + 15) + b1),
-                start - 1, int(k2 * (p + 15) + b2),
-                p, int(k2 * p + b2)])
+    try:
+        res.append([p, int(k1 * p + b1),
+                    start - 1, int(k1 * (p + 15) + b1),
+                    start - 1, int(k2 * (p + 15) + b2),
+                    p, int(k2 * p + b2)])
+    except BaseException as e:
+        print(e)
 
     for p in range(start, end + 1, r):
-        res.append([p, int(k1 * p + b1),
+        try:
+            res.append([p, int(k1 * p + b1),
                     (p + 15), int(k1 * (p + 15) + b1),
                     (p + 15), int(k2 * (p + 15) + b2),
                     p, int(k2 * p + b2)])
+        except BaseException as e:
+            print(e)
     return np.array(res, dtype=np.int).reshape([-1, 8])
 
 

@@ -8,93 +8,16 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 import numpy as np
 import csv
 import glob
 import cv2
 import argparse
-import xml.etree.ElementTree as ET
 import matplotlib.pyplot as plt
-
+from tqdm import tqdm
 from ctpn_utils import cal_rpn,shrink_poly
 import config
 from config import IMAGE_MEAN
-
-
-# 数据加载器
-def readxml(path):
-    gtboxes = []
-    imgfile = ''
-    xml = ET.parse(path)
-    for elem in xml.iter():
-        if 'filename' in elem.tag:
-            imgfile = elem.text
-        if 'object' in elem.tag:
-            for attr in list(elem):
-                if 'bndbox' in attr.tag:
-                    xmin = int(round(float(attr.find('xmin').text)))
-                    ymin = int(round(float(attr.find('ymin').text)))
-                    xmax = int(round(float(attr.find('xmax').text)))
-                    ymax = int(round(float(attr.find('ymax').text)))
-
-                    gtboxes.append((xmin, ymin, xmax, ymax))
-
-    return np.array(gtboxes), imgfile
-
-# for ctpn text detection
-class VOCDataset(Dataset):
-    def __init__(self,
-                 datadir,
-                 labelsdir):
-        '''
-
-        :param txtfile: image name list text file
-        :param datadir: image's directory
-        :param labelsdir: annotations' directory
-        '''
-        if not os.path.isdir(datadir):
-            raise Exception('[ERROR] {} is not a directory'.format(datadir))
-        if not os.path.isdir(labelsdir):
-            raise Exception('[ERROR] {} is not a directory'.format(labelsdir))
-
-        self.datadir = datadir
-        self.img_names = os.listdir(self.datadir)
-        self.labelsdir = labelsdir
-
-    def __len__(self):
-        return len(self.img_names)
-
-    def __getitem__(self, idx):
-        img_name = self.img_names[idx]
-        img_path = os.path.join(self.datadir, img_name)
-        print(img_path)
-        xml_path = os.path.join(self.labelsdir, img_name.replace('.jpg', '.xml'))
-        gtbox, _ = readxml(xml_path)
-        img = cv2.imread(img_path)
-        h, w, c = img.shape
-        # clip image
-        if np.random.randint(2) == 1:
-            img = img[:, ::-1, :]
-            newx1 = w - gtbox[:, 2] - 1
-            newx2 = w - gtbox[:, 0] - 1
-            gtbox[:, 0] = newx1
-            gtbox[:, 2] = newx2
-
-        [cls, regr], _ = cal_rpn((h, w), (int(h / 16), int(w / 16)), 16, gtbox)
-
-        m_img = img - IMAGE_MEAN
-
-        regr = np.hstack([cls.reshape(cls.shape[0], 1), regr])
-
-        cls = np.expand_dims(cls, axis=0)
-
-        # transform to torch tensor
-        m_img = torch.from_numpy(m_img.transpose([2, 0, 1])).float()
-        cls = torch.from_numpy(cls).float()
-        regr = torch.from_numpy(regr).float()
-
-        return m_img, cls, regr
 
 
 def readtxt(p):
@@ -127,7 +50,6 @@ class ICDARDataset(Dataset):
     def __init__(self,
                  datadir):
         '''
-
         :param txtfile: image name list text file
         :param datadir: image's directory
         :param labelsdir: annotations' directory
@@ -143,7 +65,7 @@ class ICDARDataset(Dataset):
     def __getitem__(self, idx):
         img_name = self.img_names[idx]
         img_path = img_name
-        print(img_path)
+        # print(img_path)
 
         img = cv2.imread(img_path)
         h, w, c = img.shape
@@ -172,13 +94,7 @@ class ICDARDataset(Dataset):
 
         gtbox = np.asarray(res_polys)
 
-        # x_min = gtbox[:, :, 0].min(axis=-1)
-        # x_max = gtbox[:, :, 0].max(axis=-1)
-        # y_min = gtbox[:, :, 1].min(axis=-1)
-        # y_max = gtbox[:, :, 1].max(axis=-1)
-        # gtbox = np.asarray([x_min,y_min,x_max,y_max]).T
-
-        if True:
+        if False:
             for p in gtbox:
                 cv2.rectangle(img, (p[0],p[1]),(p[2],p[3]), color=(0, 0, 255), thickness=2)
             fig, axs = plt.subplots(1, 1, figsize=(30, 30))
@@ -188,14 +104,6 @@ class ICDARDataset(Dataset):
             plt.tight_layout()
             plt.show()
             plt.close()
-
-        # clip image
-        if np.random.randint(2) == 1:
-            img = img[:, ::-1, :]
-            newx1 = w - gtbox[:, 2] - 1
-            newx2 = w - gtbox[:, 0] - 1
-            gtbox[:, 0] = newx1
-            gtbox[:, 2] = newx2
 
         [cls, regr], _ = cal_rpn((h, w), (int(h / 16), int(w / 16)), 16, gtbox)
 
@@ -258,7 +166,8 @@ class RPN_REGR_Loss(nn.Module):
             # print(input, target)
             loss = torch.tensor(0.0)
 
-        return loss.to(self.device)
+        # return loss.to(self.device)
+        return loss
 
 
 class RPN_CLS_Loss(nn.Module):
@@ -281,7 +190,8 @@ class RPN_CLS_Loss(nn.Module):
         loss = F.nll_loss(F.log_softmax(c_p, dim=-1), c_t)
 
         loss = torch.clamp(torch.mean(loss), 0, 10) if loss.numel() > 0 else torch.tensor(0.0)
-        return loss.to(self.device)
+        # return loss.to(self.device)
+        return loss
 
 
 class BasicConv(nn.Module):
@@ -314,7 +224,7 @@ class BasicConv(nn.Module):
 class CTPN_Model(nn.Module):
     def __init__(self):
         super().__init__()
-        base_model = models.vgg16(pretrained=False)
+        base_model = models.vgg16(pretrained=True)
         layers = list(base_model.features)[:-1]
         self.base_layers = nn.Sequential(*layers)  # block5_conv3 output
         self.rpn = BasicConv(512, 512, 3,1,1,bn=False)
@@ -357,7 +267,7 @@ random_seed = 2019
 torch.random.manual_seed(random_seed)
 np.random.seed(random_seed)
 
-num_workers = 1
+num_workers = 8
 epochs = 20
 lr = 1e-3
 resume_epoch = 0
@@ -370,10 +280,13 @@ def get_arguments():
     parser.add_argument('--image-dir', type=str, default=config.image_dir)
     parser.add_argument('--labels-dir', type=str, default=config.xml_dir)
     parser.add_argument('--pretrained-weights', type=str,default=pre_weights)
+    parser.add_argument('--gpus',type=str,default='3,4,5,6')
     return parser.parse_args()
 
 
 def save_checkpoint(state, epoch, loss_cls, loss_regr, loss, ext='pth.tar'):
+    if os.path.exists(config.checkpoints_dir):
+        os.mkdir(config.checkpoints_dir)
     check_path = os.path.join(config.checkpoints_dir,
                               f'ctpn_ep{epoch:02d}_'
                               f'{loss_cls:.4f}_{loss_regr:.4f}_{loss:.4f}.{ext}')
@@ -385,34 +298,49 @@ def save_checkpoint(state, epoch, loss_cls, loss_regr, loss, ext='pth.tar'):
 args = vars(get_arguments())
 
 if __name__ == '__main__':
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+    gpus = {i:item for i,item in enumerate(args['gpus'].split(','))}
+    os.environ['CUDA_VISIBLE_DEVICES'] = args['gpus']
+
     checkpoints_weight = args['pretrained_weights']
     if os.path.exists(checkpoints_weight):
         pretrained = False
 
-    # dataset = VOCDataset(args['image_dir'], args['labels_dir'])
     dataset = ICDARDataset(args['image_dir'])
-    dataloader = DataLoader(dataset, batch_size=2, shuffle=True, num_workers=args['num_workers'],collate_fn=collate)
+    dataloader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=args['num_workers'],collate_fn=collate)
     model = CTPN_Model()
-    model.to(device)
-    
-    if os.path.exists(checkpoints_weight):
-        print('using pretrained weight: {}'.format(checkpoints_weight))
-        if checkpoints_weight == './checkpoints/ctpn-end.pth':
-            cc = torch.load(checkpoints_weight, map_location=device)
-            for i,j in zip(list(model.state_dict().keys())[:26],list(cc.keys())[:26]):
-                model.state_dict().get(i).copy_(cc.get(j))
-        else:
-            cc = torch.load(checkpoints_weight, map_location=device)
-            model.load_state_dict(cc['model_state_dict'])
-            resume_epoch = cc['epoch']
 
-    params_to_uodate = model.parameters()
-    optimizer = optim.SGD(params_to_uodate, lr=lr, momentum=0.9)
-    
-    critetion_cls = RPN_CLS_Loss(device)
-    critetion_regr = RPN_REGR_Loss(device)
-    
+    if len(gpus) > 1:
+        device = torch.device('cuda')
+        model = nn.DataParallel(model)
+        model = model.to(device)
+        params_to_uodate = model.parameters()
+        optimizer = optim.SGD(params_to_uodate, lr=lr, momentum=0.9)
+
+        critetion_cls = RPN_CLS_Loss(0)
+        critetion_regr = RPN_REGR_Loss(0)
+
+    else:
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        model.to(device)
+
+        if os.path.exists(checkpoints_weight):
+            print('using pretrained weight: {}'.format(checkpoints_weight))
+            if checkpoints_weight == './checkpoints/ctpn-end.pth':
+                cc = torch.load(checkpoints_weight, map_location=device)
+                for i, j in zip(list(model.state_dict().keys())[:26], list(cc.keys())[:26]):
+                    model.state_dict().get(i).copy_(cc.get(j))
+            else:
+                cc = torch.load(checkpoints_weight, map_location=device)
+                model.load_state_dict(cc['model_state_dict'])
+                resume_epoch = cc['epoch']
+
+        critetion_cls = RPN_CLS_Loss(device)
+        critetion_regr = RPN_REGR_Loss(device)
+
+        params_to_uodate = model.parameters()
+        optimizer = optim.SGD(params_to_uodate, lr=lr, momentum=0.9)
+
     best_loss_cls = 100
     best_loss_regr = 100
     best_loss = 100
@@ -429,33 +357,30 @@ if __name__ == '__main__':
         epoch_loss_regr = 0
         epoch_loss = 0
         scheduler.step(epoch)
-    
-        for batch_i, (imgs, clss, regrs) in enumerate(dataloader):
-            imgs = imgs.to(device)
-            clss = clss.to(device)
-            regrs = regrs.to(device)
-    
-            optimizer.zero_grad()
-    
-            out_cls, out_regr = model(imgs)
-            loss_cls = critetion_cls(out_cls, clss)
-            loss_regr = critetion_regr(out_regr, regrs)
-    
-            loss = loss_cls + loss_regr  # total loss
-            loss.backward()
-            optimizer.step()
-    
-            epoch_loss_cls += loss_cls.item()
-            epoch_loss_regr += loss_regr.item()
-            epoch_loss += loss.item()
-            mmp = batch_i+1
 
-            if batch_i % 50 == 0:
-                print(f'Ep:{epoch}/{epochs-1}--'
-                      f'Batch:{batch_i}/{epoch_size}\n'
-                      f'batch: loss_cls:{loss_cls.item():.4f}--loss_regr:{loss_regr.item():.4f}--loss:{loss.item():.4f}\n'
-                      f'Epoch: loss_cls:{epoch_loss_cls/mmp:.4f}--loss_regr:{epoch_loss_regr/mmp:.4f}--'
-                      f'loss:{epoch_loss/mmp:.4f}\n')
+        with tqdm(total=len(dataloader), desc='Train Epoch:{}'.format(epoch)) as pbar:
+            for batch_i, (imgs, clss, regrs) in enumerate(dataloader):
+                imgs = imgs.to(device)
+                clss = clss.to(device)
+                regrs = regrs.to(device)
+
+                optimizer.zero_grad()
+
+                out_cls, out_regr = model(imgs)
+                loss_cls = critetion_cls(out_cls, clss)
+                loss_regr = critetion_regr(out_regr, regrs)
+
+                loss = loss_cls + loss_regr  # total loss
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss_cls += loss_cls.item()
+                epoch_loss_regr += loss_regr.item()
+                epoch_loss += loss.item()
+                mmp = batch_i + 1
+
+                pbar.set_postfix({'loss': '{0:1.5f}'.format(epoch_loss/mmp),'loss_cls': '{0:1.4f}'.format(loss_cls.item()),'loss_reg': '{0:1.4f}'.format(loss_regr.item())})  # 输入一个字典，显示实验指标
+                pbar.update(1)
     
         epoch_loss_cls /= epoch_size
         epoch_loss_regr /= epoch_size
