@@ -1,9 +1,4 @@
-#-*- coding:utf-8 -*-
-#'''
-# Created on 18-12-11 上午10:09
-#
-# @Author: Greg Gao(laygin)
-#'''
+
 import os
 
 # base_dir = 'path to dataset base dir'

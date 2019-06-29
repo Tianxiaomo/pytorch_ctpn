@@ -15,7 +15,7 @@ import cv2
 import argparse
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from ctpn_utils import cal_rpn,shrink_poly
+from ctpn_utils import *
 import config
 from config import IMAGE_MEAN
 
@@ -65,7 +65,6 @@ class ICDARDataset(Dataset):
     def __getitem__(self, idx):
         img_name = self.img_names[idx]
         img_path = img_name
-        # print(img_path)
 
         img = cv2.imread(img_path)
         h, w, c = img.shape
@@ -94,18 +93,7 @@ class ICDARDataset(Dataset):
 
         gtbox = np.asarray(res_polys)
 
-        if False:
-            for p in gtbox:
-                cv2.rectangle(img, (p[0],p[1]),(p[2],p[3]), color=(0, 0, 255), thickness=2)
-            fig, axs = plt.subplots(1, 1, figsize=(30, 30))
-            axs.imshow(img[:, :, ::-1])
-            axs.set_xticks([])
-            axs.set_yticks([])
-            plt.tight_layout()
-            plt.show()
-            plt.close()
-
-        [cls, regr], _ = cal_rpn((h, w), (int(h / 16), int(w / 16)), 16, gtbox)
+        [cls, regr], _,[w_in,w_out] = cal_rpn((h, w), (int(h / 16), int(w / 16)), 16, gtbox)
 
         m_img = img - IMAGE_MEAN
 
@@ -113,37 +101,67 @@ class ICDARDataset(Dataset):
 
         cls = np.expand_dims(cls, axis=0)
 
+        if via :
+            timg = img.copy()
+            for p in gtbox:
+                cv2.rectangle(timg, (p[0],p[1]),(p[2],p[3]), color=(255, 0, 0), thickness=2)
+            plt.imshow(timg[:,:,::-1])
+            plt.show()
+
+            anchor = gen_anchor((int(1024 / 16), int(1024 / 16)), 16)
+            bbox = bbox_transfor_inv(anchor, np.expand_dims(regr[:,1:],0))
+            bbox = clip_box(bbox, [1024, 1024])
+
+            fg = np.where(cls[0, :] == 1)[0]
+            select_anchor = bbox[fg, :].astype(np.int32)
+
+            img = img.copy()
+            for p in select_anchor:
+                cv2.rectangle(img, (p[0], p[1]), (p[2], p[3]), color=(0, 0, 255), thickness=2)
+
+            fg = np.where(cls[0, :] == 0)[0]
+            select_anchor = bbox[fg, :].astype(np.int32)
+            for p in select_anchor:
+                cv2.rectangle(img, (p[0], p[1]), (p[2], p[3]), color=(0, 255, 0), thickness=2)
+            plt.imshow(img[:, :, ::-1])
+            plt.show()
+
         # transform to torch tensor
         m_img = torch.from_numpy(m_img.transpose([2, 0, 1])).float()
         cls = torch.from_numpy(cls).float()
         regr = torch.from_numpy(regr).float()
+        w_in = torch.from_numpy(w_in).float()
+        w_out = torch.from_numpy(w_out).float()
 
-        return m_img, cls, regr
+        return m_img, cls, regr,w_in,w_out
 
 
 def collate(batch):
     r"""Puts each data field into a tensor with outer dimension batch size"""
-    imgs,clss,regrs = [],[],[]
-    for i,c,r in batch:
+    imgs,clss,regrs,w_in,w_out = [],[],[],[],[]
+    for i,c,r,w_i,w_o in batch:
         imgs.append(i)
         clss.append(c)
         regrs.append(r)
+        w_in.append(w_i)
+        w_out.append(w_o)
 
     imgs = torch.stack(imgs, 0)
     clss = torch.stack(clss, 0)
     regrs = torch.stack(regrs, 0)
+    w_in = torch.stack(w_in,0)
+    w_out = torch.stack(w_out,0)
 
-    return imgs,clss,regrs
+    return imgs,clss,regrs,w_in,w_out
 
 
 # 模型 =============================
 class RPN_REGR_Loss(nn.Module):
-    def __init__(self, device, sigma=9.0):
+    def __init__(self, sigma=9.0):
         super(RPN_REGR_Loss, self).__init__()
         self.sigma = sigma
-        self.device = device
 
-    def forward(self, input, target):
+    def forward(self, input, target,w_in=None,w_out=None):
         '''
         smooth L1 loss
         :param input:y_preds
@@ -162,18 +180,16 @@ class RPN_REGR_Loss(nn.Module):
             loss = torch.sum(loss, 1)
             loss = torch.mean(loss) if loss.numel() > 0 else torch.tensor(0.0)
         except Exception as e:
-            print('RPN_REGR_Loss Exception:', e)
+            # print('RPN_REGR_Loss Exception:', e)
             # print(input, target)
             loss = torch.tensor(0.0)
 
-        # return loss.to(self.device)
         return loss
 
 
 class RPN_CLS_Loss(nn.Module):
-    def __init__(self,device):
+    def __init__(self):
         super(RPN_CLS_Loss, self).__init__()
-        self.device = device
 
     def forward(self, input, target):
         # y_true = target[0][0]
@@ -182,15 +198,16 @@ class RPN_CLS_Loss(nn.Module):
         # cls_pred = input[0][cls_keep]
         # loss = F.nll_loss(F.log_softmax(cls_pred, dim=-1), cls_true)  # original is sparse_softmax_cross_entropy_with_logits
         # loss = nn.BCEWithLogitsLoss()(cls_pred[:,0], cls_true.float())  # 18-12-8
+        try:
+            y_t = target[:,0,:]
+            c_k = (y_t != -1).nonzero()
+            c_t = y_t[np.asarray(c_k.cpu()).T].long()
+            c_p = input[np.asarray(c_k.cpu()).T]
+            loss = F.nll_loss(F.log_softmax(c_p, dim=-1), c_t)
 
-        y_t = target[:,0,:]
-        c_k = (y_t != -1).nonzero()
-        c_t = y_t[np.asarray(c_k.cpu()).T].long()
-        c_p = input[np.asarray(c_k.cpu()).T]
-        loss = F.nll_loss(F.log_softmax(c_p, dim=-1), c_t)
-
-        loss = torch.clamp(torch.mean(loss), 0, 10) if loss.numel() > 0 else torch.tensor(0.0)
-        # return loss.to(self.device)
+            loss = torch.clamp(torch.mean(loss), 0, 10) if loss.numel() > 0 else torch.tensor(0.0)
+        except BaseException as e:
+            loss = torch.tensor(0.0)
         return loss
 
 
@@ -267,110 +284,143 @@ random_seed = 2019
 torch.random.manual_seed(random_seed)
 np.random.seed(random_seed)
 
-num_workers = 8
-epochs = 20
+num_workers = 1
+batch_size = num_workers
+gpus = '7'
+epochs = 40
 lr = 1e-3
+opt = 'SGD'
 resume_epoch = 0
-pre_weights = os.path.join(config.checkpoints_dir, 'ctpn-end.pth')
-
+pre_weights = os.path.join(config.checkpoints_dir, 'ctpn_ep11_0.0085_0.0151_0.0236(w-lstm).pth.tar')
 
 def get_arguments():
     parser = argparse.ArgumentParser(description='Pytorch CTPN For TexT Detection')
     parser.add_argument('--num-workers', type=int, default=num_workers)
+    parser.add_argument('--batch-size',type=int,default=batch_size)
     parser.add_argument('--image-dir', type=str, default=config.image_dir)
     parser.add_argument('--labels-dir', type=str, default=config.xml_dir)
     parser.add_argument('--pretrained-weights', type=str,default=pre_weights)
-    parser.add_argument('--gpus',type=str,default='3,4,5,6')
+    parser.add_argument('--gpus',type=str,default=gpus)
+    parser.add_argument('--opt', type=str, default=opt)
     return parser.parse_args()
 
 
 def save_checkpoint(state, epoch, loss_cls, loss_regr, loss, ext='pth.tar'):
-    if os.path.exists(config.checkpoints_dir):
+    if not os.path.exists(config.checkpoints_dir):
         os.mkdir(config.checkpoints_dir)
     check_path = os.path.join(config.checkpoints_dir,
                               f'ctpn_ep{epoch:02d}_'
                               f'{loss_cls:.4f}_{loss_regr:.4f}_{loss:.4f}.{ext}')
 
     torch.save(state, check_path)
-    print('saving to {}'.format(check_path))
+    log.info('saving to {}'.format(check_path))
 
 
 args = vars(get_arguments())
 
 if __name__ == '__main__':
 
+    log = init_logger(log_path='logs')
+
+    log.info('opt {},batch{},lr {},gpu:{}'.format(opt,batch_size,lr,gpus))
+
     gpus = {i:item for i,item in enumerate(args['gpus'].split(','))}
     os.environ['CUDA_VISIBLE_DEVICES'] = args['gpus']
 
     checkpoints_weight = args['pretrained_weights']
-    if os.path.exists(checkpoints_weight):
-        pretrained = False
 
     dataset = ICDARDataset(args['image_dir'])
-    dataloader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=args['num_workers'],collate_fn=collate)
+    dataloader = DataLoader(dataset, batch_size=args['batch_size'], shuffle=True, num_workers=args['num_workers'],collate_fn=collate)
     model = CTPN_Model()
 
     if len(gpus) > 1:
         device = torch.device('cuda')
         model = nn.DataParallel(model)
         model = model.to(device)
-        params_to_uodate = model.parameters()
-        optimizer = optim.SGD(params_to_uodate, lr=lr, momentum=0.9)
-
-        critetion_cls = RPN_CLS_Loss(0)
-        critetion_regr = RPN_REGR_Loss(0)
-
     else:
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         model.to(device)
 
-        if os.path.exists(checkpoints_weight):
-            print('using pretrained weight: {}'.format(checkpoints_weight))
-            if checkpoints_weight == './checkpoints/ctpn-end.pth':
-                cc = torch.load(checkpoints_weight, map_location=device)
-                for i, j in zip(list(model.state_dict().keys())[:26], list(cc.keys())[:26]):
-                    model.state_dict().get(i).copy_(cc.get(j))
-            else:
-                cc = torch.load(checkpoints_weight, map_location=device)
-                model.load_state_dict(cc['model_state_dict'])
-                resume_epoch = cc['epoch']
-
-        critetion_cls = RPN_CLS_Loss(device)
-        critetion_regr = RPN_REGR_Loss(device)
-
-        params_to_uodate = model.parameters()
+    params_to_uodate = model.parameters()
+    if args['opt'] == 'SGD':
         optimizer = optim.SGD(params_to_uodate, lr=lr, momentum=0.9)
+    else:
+        optimizer = optim.Adam(params_to_uodate, lr=lr)
 
-    best_loss_cls = 100
-    best_loss_regr = 100
-    best_loss = 100
+    if os.path.exists(checkpoints_weight):
+        log.info('using pretrained weight: {}'.format(checkpoints_weight))
+        cc = torch.load(checkpoints_weight, map_location=device)
+        model.load_state_dict(cc['model_state_dict'],strict=False)
+        resume_epoch = cc['epoch']
+
+    critetion_cls = RPN_CLS_Loss()
+    critetion_regr = RPN_REGR_Loss()
+
+    best_loss,best_loss_cls,best_loss_regr = 100,100,100
     best_model = None
     epochs += resume_epoch
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
-    
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+
+    via = False
+
     for epoch in range(resume_epoch+1, epochs):
-        print(f'Epoch {epoch}/{epochs}')
-        print('#'*50)
-        epoch_size = len(dataset) // 1
+        log.info(f'Epoch {epoch}/{epochs}')
+        epoch_size = len(dataloader)
         model.train()
-        epoch_loss_cls = 0
-        epoch_loss_regr = 0
-        epoch_loss = 0
+        epoch_loss,epoch_loss_cls,epoch_loss_regr = 0,0,0
         scheduler.step(epoch)
 
         with tqdm(total=len(dataloader), desc='Train Epoch:{}'.format(epoch)) as pbar:
-            for batch_i, (imgs, clss, regrs) in enumerate(dataloader):
+            for batch_i, (imgs, clss, regrs,w_in,w_out) in enumerate(dataloader):
                 imgs = imgs.to(device)
                 clss = clss.to(device)
                 regrs = regrs.to(device)
+                w_in = w_in.to(device)
+                w_out = w_out.to(device)
 
                 optimizer.zero_grad()
 
                 out_cls, out_regr = model(imgs)
+
+                # if via:
+                #     cls_prob = F.softmax(out_cls.data, dim=-1).cpu().numpy()
+                #     regr = out_regr.data.cpu().numpy()
+                #     anchor = gen_anchor((int(1024 / 16), int(1024 / 16)), 16)
+                #     bbox = bbox_transfor_inv(anchor, regr)
+                #     bbox = clip_box(bbox, [1024, 1024])
+                #
+                #     fg = np.where(cls_prob[0, :, 1] > 0.7)[0]
+                #     select_anchor = bbox[fg, :].astype(np.int32)
+                #
+                #     img = (imgs[0].data.cpu().permute(1,2,0).numpy().copy() + IMAGE_MEAN).astype(np.uint8)
+                #     for p in select_anchor:
+                #         cv2.rectangle(img, (p[0], p[1]), (p[2], p[3]), color=(0, 0, 255), thickness=2)
+                #     plt.imshow(img[:,:,::-1])
+                #     plt.show()
+                #
+                #     cls_prob = clss.data.cpu().numpy()
+                #     regr = regrs.data.cpu().numpy()
+                #     anchor = gen_anchor((int(1024 / 16), int(1024 / 16)), 16)
+                #     bbox = bbox_transfor_inv(anchor, regr)
+                #     bbox = clip_box(bbox, [1024, 1024])
+                #
+                #     fg = np.where(cls_prob[0, 0, :] > 0.7)[0]
+                #     select_anchor = bbox[fg, :].astype(np.int32)
+                #
+                #     img = (imgs[0].data.cpu().permute(1,2,0).numpy().copy() + IMAGE_MEAN).astype(np.uint8)
+                #     for p in select_anchor:
+                #         cv2.rectangle(img, (p[0], p[1]), (p[2], p[3]), color=(0, 0, 255), thickness=2)
+                #     plt.imshow(img[:,:,::-1])
+                #     plt.show()
+
                 loss_cls = critetion_cls(out_cls, clss)
-                loss_regr = critetion_regr(out_regr, regrs)
+                loss_regr = critetion_regr(out_regr, regrs,w_in,w_out)
 
                 loss = loss_cls + loss_regr  # total loss
+
+                if loss.item() == 0:
+                    continue
+
                 loss.backward()
                 optimizer.step()
 
@@ -385,7 +435,7 @@ if __name__ == '__main__':
         epoch_loss_cls /= epoch_size
         epoch_loss_regr /= epoch_size
         epoch_loss /= epoch_size
-        print(f'Epoch:{epoch}--{epoch_loss_cls:.4f}--{epoch_loss_regr:.4f}--{epoch_loss:.4f}')
+        log.info(f'Epoch:{epoch}--{epoch_loss_cls:.4f}--{epoch_loss_regr:.4f}--{epoch_loss:.4f}')
         if best_loss_cls > epoch_loss_cls or best_loss_regr > epoch_loss_regr or best_loss > epoch_loss:
             best_loss = epoch_loss
             best_loss_regr = epoch_loss_regr
@@ -397,7 +447,7 @@ if __name__ == '__main__':
                             best_loss_cls,
                             best_loss_regr,
                             best_loss)
-    
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 

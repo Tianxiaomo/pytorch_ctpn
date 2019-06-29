@@ -1,12 +1,47 @@
-#-*- coding:utf-8 -*-
-#'''
-# Created on 18-12-11 上午10:05
-#
-# @Author: Greg Gao(laygin)
-#'''
+
 import numpy as np
 import cv2
 from config import *
+import datetime
+import logging
+import sys
+import os
+
+import numpy.random as npr
+
+
+def get_date_str():
+    now = datetime.datetime.now()
+    return now.strftime('%Y-%m-%d_%H-%M-%S')
+
+def init_logger(log_file=None, log_path=None, log_level=logging.DEBUG, mode='w', stdout=True):
+    """
+    log_path: 日志文件的文件夹路径
+    mode: 'a', append; 'w', 覆盖原文件写入.
+    """
+    fmt = '%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s: %(message)s'
+    if log_path is None:
+        log_path = '~/temp/log/'
+    if log_file is None:
+        log_file = 'log_' + get_date_str() + '.log'
+    log_file = os.path.join(log_path, log_file)
+    # 此处不能使用logging输出
+    print('log file path:' + log_file)
+    if not os.path.exists(log_path):
+        os.mkdir(log_path)
+    logging.basicConfig(level=log_level,
+                        format=fmt,
+                        filename=os.path.abspath(log_file),
+                        filemode=mode)
+
+    if stdout:
+        console = logging.StreamHandler(stream=sys.stdout)
+        console.setLevel(log_level)
+        formatter = logging.Formatter(fmt)
+        console.setFormatter(formatter)
+        logging.getLogger('').addHandler(console)
+
+    return logging
 
 
 def resize(image, width=None, height=None, inter=cv2.INTER_AREA):
@@ -188,61 +223,265 @@ def cal_rpn(imgsize, featuresize, scale, gtboxes):
         labels = np.empty(base_anchor.shape[0])
         labels.fill(-1)
         bbox_targets = np.zeros([base_anchor.shape[0],2])
-        return [labels,bbox_targets], base_anchor
+        bbox_inside_weights = np.zeros((base_anchor.shape[0], 2), dtype=np.float32)
+        bbox_outside_weights = np.zeros((base_anchor.shape[0], 2), dtype=np.float32)
+
+        return [labels,bbox_targets], base_anchor,[bbox_inside_weights,bbox_outside_weights]
 
     imgh, imgw = imgsize
 
     # gen base anchor
     base_anchor = gen_anchor(featuresize, scale)
 
-    # calculate iou
-    overlaps = cal_overlaps(base_anchor, gtboxes)
+#################################################################
+    tf = False
+    if tf:
+        DEBUG = False
+        _allowed_border = 0
+        # only keep anchors inside the image
+        # 仅保留那些还在图像内部的anchor，超出图像的都删掉
+        inds_inside = np.where(
+            (base_anchor[:, 0] >= -_allowed_border) &
+            (base_anchor[:, 1] >= -_allowed_border) &
+            (base_anchor[:, 2] < imgw + _allowed_border) &  # width
+            (base_anchor[:, 3] < imgh + _allowed_border)  # height
+        )[0]
 
-    # init labels -1 don't care  0 is negative  1 is positive
-    labels = np.empty(base_anchor.shape[0])
-    labels.fill(-1)
+        if DEBUG:
+            print('inds_inside', len(inds_inside))
 
-    # for each GT box corresponds to an anchor which has highest IOU
-    gt_argmax_overlaps = overlaps.argmax(axis=0)
+        # keep only inside anchors
+        anchors = base_anchor[inds_inside, :]  # 保留那些在图像内的anchor
+        if DEBUG:
+            print('anchors.shape', anchors.shape)
 
-    # the anchor with the highest IOU overlap with a GT box
-    anchor_argmax_overlaps = overlaps.argmax(axis=1)
-    anchor_max_overlaps = overlaps[range(overlaps.shape[0]), anchor_argmax_overlaps]
+        # 至此，anchor准备好了
+        # --------------------------------------------------------------
+        # label: 1 is positive, 0 is negative, -1 is dont care
+        # (A)
+        labels = np.empty((len(inds_inside),), dtype=np.float32)
+        labels.fill(-1)  # 初始化label，均为-1
 
-    # IOU > IOU_POSITIVE
-    labels[anchor_max_overlaps > IOU_POSITIVE] = 1
-    # IOU <IOU_NEGATIVE
-    labels[anchor_max_overlaps < IOU_NEGATIVE] = 0
-    # ensure that every GT box has at least one positive RPN region
-    labels[gt_argmax_overlaps] = 1
+        # overlaps between the anchors and the gt boxes
+        # overlaps (ex, gt), shape is A x G
+        # 计算anchor和gt-box的overlap，用来给anchor上标签
+        # overlaps = bbox_overlaps(
+        #     np.ascontiguousarray(anchors, dtype=np.float),
+        #     np.ascontiguousarray(gt_boxes, dtype=np.float))  # 假设anchors有x个，gt_boxes有y个，返回的是一个（x,y）的数组
+        overlaps = cal_overlaps(anchors, gtboxes)
 
-    # only keep anchors inside the image
-    outside_anchor = np.where(
-        (base_anchor[:, 0] < 0) |
-        (base_anchor[:, 1] < 0) |
-        (base_anchor[:, 2] >= imgw) |
-        (base_anchor[:, 3] >= imgh)
-    )[0]
-    labels[outside_anchor] = -1
 
-    # subsample positive labels ,if greater than RPN_POSITIVE_NUM(default 128)
-    fg_index = np.where(labels == 1)[0]
-    if (len(fg_index) > RPN_POSITIVE_NUM):
-        labels[np.random.choice(fg_index, len(fg_index) - RPN_POSITIVE_NUM, replace=False)] = -1
+        # 存放每一个anchor和每一个gtbox之间的overlap
+        argmax_overlaps = overlaps.argmax(axis=1)  # (A)#找到和每一个gtbox，overlap最大的那个anchor
+        max_overlaps = overlaps[np.arange(len(inds_inside)), argmax_overlaps]
+        gt_argmax_overlaps = overlaps.argmax(axis=0)  # G#找到每个位置上9个anchor中与gtbox，overlap最大的那个
+        gt_max_overlaps = overlaps[gt_argmax_overlaps,
+                                   np.arange(overlaps.shape[1])]
+        gt_max_overlaps[np.where(gt_max_overlaps == 0)] = 1
+        gt_argmax_overlaps = np.where(overlaps == gt_max_overlaps)[0]
 
-    # subsample negative labels
-    bg_index = np.where(labels == 0)[0]
-    num_bg = RPN_TOTAL_NUM - np.sum(labels == 1)
-    if (len(bg_index) > num_bg):
-        # print('bgindex:',len(bg_index),'num_bg',num_bg)
-        labels[np.random.choice(bg_index, len(bg_index) - num_bg, replace=False)] = -1
+        EPS = 1e-14
+        RPN_CLOBBER_POSITIVES = False
+        RPN_NEGATIVE_OVERLAP = 0.3
+        RPN_POSITIVE_OVERLAP = 0.7
+        RPN_FG_FRACTION = 0.5
+        RPN_BATCHSIZE = 300
+        RPN_BBOX_INSIDE_WEIGHTS = (1.0, 1.0, 1.0, 1.0)
+        RPN_POSITIVE_WEIGHT = -1.0
 
-    # calculate bbox targets
-    # debug here
-    bbox_targets = bbox_transfrom(base_anchor, gtboxes[anchor_argmax_overlaps, :])
-    # bbox_targets=[]
+        RPN_PRE_NMS_TOP_N = 12000
+        RPN_POST_NMS_TOP_N = 1000
+        RPN_NMS_THRESH = 0.7
+        RPN_MIN_SIZE = 8
 
-    return [labels, bbox_targets], base_anchor
+        _counts = EPS
+        _sums = np.zeros((1, 2))
+        _squared_sums = np.zeros((1, 2))
+        _fg_sum = 0
+        _bg_sum = 0
+        _count = 0
+
+        if not RPN_CLOBBER_POSITIVES:
+            # assign bg labels first so that positive labels can clobber them
+            labels[max_overlaps < RPN_NEGATIVE_OVERLAP] = 0  # 先给背景上标签，小于0.3overlap的
+
+        # fg label: for each gt, anchor with highest overlap
+        labels[gt_argmax_overlaps] = 1  # 每个位置上的9个anchor中overlap最大的认为是前景
+        # fg label: above threshold IOU
+        labels[max_overlaps >= RPN_POSITIVE_OVERLAP] = 1  # overlap大于0.7的认为是前景
+
+        if RPN_CLOBBER_POSITIVES:
+            # assign bg labels last so that negative labels can clobber positives
+            labels[max_overlaps < RPN_NEGATIVE_OVERLAP] = 0
+
+        # subsample positive labels if we have too many
+        # 对正样本进行采样，如果正样本的数量太多的话
+        # 限制正样本的数量不超过128个
+        num_fg = int(RPN_FG_FRACTION * RPN_BATCHSIZE)
+        fg_inds = np.where(labels == 1)[0]
+        if len(fg_inds) > num_fg:
+            disable_inds = npr.choice(
+                fg_inds, size=(len(fg_inds) - num_fg), replace=False)  # 随机去除掉一些正样本
+            labels[disable_inds] = -1  # 变为-1
+
+        # subsample negative labels if we have too many
+        # 对负样本进行采样，如果负样本的数量太多的话
+        # 正负样本总数是256，限制正样本数目最多128，
+        # 如果正样本数量小于128，差的那些就用负样本补上，凑齐256个样本
+        num_bg = RPN_BATCHSIZE - np.sum(labels == 1)
+        bg_inds = np.where(labels == 0)[0]
+        if len(bg_inds) > num_bg:
+            disable_inds = npr.choice(
+                bg_inds, size=(len(bg_inds) - num_bg), replace=False)
+            labels[disable_inds] = -1
+            # print "was %s inds, disabling %s, now %s inds" % (
+            # len(bg_inds), len(disable_inds), np.sum(labels == 0))
+
+        # 至此， 上好标签，开始计算rpn-box的真值
+        # --------------------------------------------------------------
+        bbox_targets = np.zeros((len(inds_inside), 4), dtype=np.float32)
+        bbox_targets = bbox_transfrom(anchors, gtboxes[argmax_overlaps, :])  # 根据anchor和gtbox计算得真值（anchor和gtbox之间的偏差）
+
+        bbox_inside_weights = np.zeros((len(inds_inside), 4), dtype=np.float32)
+        bbox_inside_weights[labels == 1, :] = np.array(RPN_BBOX_INSIDE_WEIGHTS)  # 内部权重，前景就给1，其他是0
+
+        bbox_outside_weights = np.zeros((len(inds_inside), 4), dtype=np.float32)
+        if RPN_POSITIVE_WEIGHT < 0:  # 暂时使用uniform 权重，也就是正样本是1，负样本是0
+            # uniform weighting of examples (given non-uniform sampling)
+            num_examples = np.sum(labels >= 0) + 1
+            # positive_weights = np.ones((1, 4)) * 1.0 / num_examples
+            # negative_weights = np.ones((1, 4)) * 1.0 / num_examples
+            positive_weights = np.ones((1, 4))
+            negative_weights = np.zeros((1, 4))
+        else:
+            assert ((RPN_POSITIVE_WEIGHT > 0) &
+                    (RPN_POSITIVE_WEIGHT < 1))
+            positive_weights = (RPN_POSITIVE_WEIGHT /
+                                (np.sum(labels == 1)) + 1)
+            negative_weights = ((1.0 - RPN_POSITIVE_WEIGHT) /
+                                (np.sum(labels == 0)) + 1)
+        bbox_outside_weights[labels == 1, :] = positive_weights  # 外部权重，前景是1，背景是0
+        bbox_outside_weights[labels == 0, :] = negative_weights
+
+        if DEBUG:
+            _sums += bbox_targets[labels == 1, :].sum(axis=0)
+            _squared_sums += (bbox_targets[labels == 1, :] ** 2).sum(axis=0)
+            _counts += np.sum(labels == 1)
+            means = _sums / _counts
+            stds = np.sqrt(_squared_sums / _counts - means ** 2)
+            print('means:')
+            print(means)
+            print('stdevs:')
+            print(stds)
+
+        def _unmap(data, count, inds, fill=0):
+            """ Unmap a subset of item (data) back to the original set of items (of
+            size count) """
+            if len(data.shape) == 1:
+                ret = np.empty((count.shape[0],), dtype=np.float32)
+                ret.fill(fill)
+                ret[inds] = data
+            else:
+                ret = np.empty((count.shape[0],) + data.shape[1:], dtype=np.float32)
+                ret.fill(fill)
+                ret[inds, :] = data
+            return ret
+
+        # map up to original set of anchors
+        # 一开始是将超出图像范围的anchor直接丢掉的，现在在加回来
+        labels = _unmap(labels, base_anchor, inds_inside, fill=-1)  # 这些anchor的label是-1，也即dontcare
+        bbox_targets = _unmap(bbox_targets, base_anchor, inds_inside, fill=0)  # 这些anchor的真值是0，也即没有值
+        bbox_inside_weights = _unmap(bbox_inside_weights, base_anchor, inds_inside, fill=0)  # 内部权重以0填充
+        bbox_outside_weights = _unmap(bbox_outside_weights, base_anchor, inds_inside, fill=0)  # 外部权重以0填充
+
+        if DEBUG:
+            print('rpn: max max_overlap', np.max(max_overlaps))
+            print('rpn: num_positive', np.sum(labels == 1))
+            print('rpn: num_negative', np.sum(labels == 0))
+            _fg_sum += np.sum(labels == 1)
+            _bg_sum += np.sum(labels == 0)
+            _count += 1
+            print('rpn: num_positive avg', _fg_sum / _count)
+            print('rpn: num_negative avg', _bg_sum / _count)
+
+        return [labels, bbox_targets], base_anchor ,[bbox_inside_weights,bbox_outside_weights]
+    # labels
+    # labels = labels.reshape((1, height, width, A))  # reshap一下label
+    # rpn_labels = labels
+
+    # bbox_targets
+    # bbox_targets = bbox_targets \
+    #     .reshape((1, height, width, A * 4))  # reshape
+
+    # rpn_bbox_targets = bbox_targets
+    # # bbox_inside_weights
+    # bbox_inside_weights = bbox_inside_weights \
+    #     .reshape((1, height, width, A * 4))
+    #
+    # rpn_bbox_inside_weights = bbox_inside_weights
+    #
+    # # bbox_outside_weights
+    # bbox_outside_weights = bbox_outside_weights \
+    #     .reshape((1, height, width, A * 4))
+    # rpn_bbox_outside_weights = bbox_outside_weights
+
+#################################################################
+    else:
+        # calculate iou
+        overlaps = cal_overlaps(base_anchor, gtboxes)
+
+        # init labels -1 don't care  0 is negative  1 is positive
+        labels = np.empty(base_anchor.shape[0])
+        labels.fill(-1)
+
+        # for each GT box corresponds to an anchor which has highest IOU
+        gt_argmax_overlaps = overlaps.argmax(axis=0)
+        gt_max_overlaps = overlaps[gt_argmax_overlaps,range(overlaps.shape[1])]
+
+
+        # the anchor with the highest IOU overlap with a GT box
+        anchor_argmax_overlaps = overlaps.argmax(axis=1)
+        anchor_max_overlaps = overlaps[range(overlaps.shape[0]), anchor_argmax_overlaps]
+
+        # IOU > IOU_POSITIVE
+        labels[anchor_max_overlaps > IOU_POSITIVE] = 1
+        # IOU <IOU_NEGATIVE
+        labels[anchor_max_overlaps < IOU_NEGATIVE] = 0
+        # ensure that every GT box has at least one positive RPN region
+        # labels[gt_max_overlaps > 0] = 1
+        labels[gt_argmax_overlaps[gt_max_overlaps > 0]] = 1
+
+        # only keep anchors inside the image
+        outside_anchor = np.where(
+            (base_anchor[:, 0] < 0) |
+            (base_anchor[:, 1] < 0) |
+            (base_anchor[:, 2] >= imgw) |
+            (base_anchor[:, 3] >= imgh)
+        )[0]
+        labels[outside_anchor] = -1
+
+        # subsample positive labels ,if greater than RPN_POSITIVE_NUM(default 128)
+        fg_index = np.where(labels == 1)[0]
+        if (len(fg_index) > RPN_POSITIVE_NUM):
+            labels[np.random.choice(fg_index, len(fg_index) - RPN_POSITIVE_NUM, replace=False)] = -1
+
+        # subsample negative labels
+        bg_index = np.where(labels == 0)[0]
+        num_bg = RPN_TOTAL_NUM - np.sum(labels == 1)
+        if (len(bg_index) > num_bg):
+            # print('bgindex:',len(bg_index),'num_bg',num_bg)
+            labels[np.random.choice(bg_index, len(bg_index) - num_bg, replace=False)] = -1
+
+        # calculate bbox targets
+        # debug here
+        bbox_targets = bbox_transfrom(base_anchor, gtboxes[anchor_argmax_overlaps, :])
+        # bbox_targets=[]
+
+        bbox_inside_weights = np.zeros((base_anchor.shape[0], 2), dtype=np.float32)
+        bbox_outside_weights = np.zeros((base_anchor.shape[0], 2), dtype = np.float32)
+
+        return [labels, bbox_targets], base_anchor,[bbox_inside_weights,bbox_outside_weights]
+
 
 
 def nms(dets, thresh):
