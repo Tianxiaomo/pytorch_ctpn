@@ -19,7 +19,7 @@ from torch.utils.data import Dataset
 from torchvision.models.squeezenet import squeezenet1_1 as Squeezenet
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '5'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 import numpy as np
 import glob
 import cv2
@@ -27,15 +27,12 @@ import random
 import argparse
 import config
 from config import IMAGE_MEAN
+from sklearn.model_selection import train_test_split
 
 
 class Image_Dataset(Dataset):
-    def __init__(self,datadir):
-        if not os.path.isdir(datadir):
-            raise Exception('[ERROR] {} is not a directory'.format(datadir))
-
-        self.datadir = datadir
-        self.img_names = glob.glob(self.datadir + '/*.jpg')
+    def __init__(self,data):
+        self.img_names = data
 
         M1 = cv2.getRotationMatrix2D((256 / 2, 256 / 2),90,1)
         M2 = cv2.getRotationMatrix2D((256 / 2, 256 / 2),180,1)
@@ -68,7 +65,7 @@ np.random.seed(random_seed)
 
 num_workers = 1
 epochs = 20
-lr = 1e-3
+lr = 1e-4
 resume_epoch = 0
 pre_weights = os.path.join(config.checkpoints_dir, 'ctpn-end.pth')
 
@@ -99,11 +96,14 @@ if __name__ == '__main__':
     if os.path.exists(checkpoints_weight):
         pretrained = False
 
-    dataset = Image_Dataset(args['image_dir'])
-    train_loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=args['num_workers'])
-    val_loader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=args['num_workers'])
+    img_list = glob.glob(args['image_dir'] + '/*.jpg')
+    traindata,testdata = train_test_split(img_list, test_size = 0.1)
+    train_dataset = Image_Dataset(traindata)
+    test_dataset = Image_Dataset(testdata)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=args['num_workers'])
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=True, num_workers=args['num_workers'])
 
-    model = Squeezenet(pretrained=False)
+    model = Squeezenet(pretrained=True)
 
     # pretrained_dict = model0.state_dict()
     # model = Squeezenet(num_classes=4)
@@ -128,7 +128,8 @@ if __name__ == '__main__':
     model.to(device)
 
     params_to_uodate = model.parameters()
-    optimizer = optim.SGD(params_to_uodate, lr=lr, momentum=0.9)
+    # optimizer = optim.SGD(params_to_uodate, lr=lr, momentum=0.9)
+    optimizer = optim.Adam(params_to_uodate,lr=lr)
 
     best_loss_cls = 100
     best_loss_regr = 100
@@ -140,11 +141,13 @@ if __name__ == '__main__':
     for epoch in range(resume_epoch + 1, epochs):
         print(f'Epoch {epoch}/{epochs}')
         print('#' * 50)
-        epoch_size = len(dataset) // 1
+        epoch_size = len(train_loader)
         model.train()
         epoch_loss_cls = 0
         epoch_loss_regr = 0
         epoch_loss = 0
+        acc = 0
+        val_acc = 0
         scheduler.step(epoch)
 
         for batch_idx, (imgs, clss) in enumerate(train_loader):
@@ -155,10 +158,23 @@ if __name__ == '__main__':
             loss = F.nll_loss(out_cls, clss)
             loss.backward()
             optimizer.step()
+            acc += (out_cls.argmax(dim=1) == clss).sum().item()
             if batch_idx % 5 == 0:
-                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f},acc:{}'.format(
                     epoch, batch_idx * len(imgs), len(train_loader.dataset),
-                           100. * batch_idx / len(train_loader), loss.item()))
+                           100. * batch_idx / len(train_loader), loss.item(),acc/(batch_idx+1)))
+
+        for batch_idx, (imgs, clss) in enumerate(test_loader):
+            imgs = imgs.to(device)
+            clss = clss.to(device)
+            optimizer.zero_grad()
+            out_cls = model(imgs)
+            loss = F.nll_loss(out_cls, clss)
+            val_acc += (out_cls.argmax(dim=1) == clss).sum().item()
+            if batch_idx % 5 == 0:
+                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f},acc:{}'.format(
+                    epoch, batch_idx * len(imgs), len(test_loader.dataset),
+                           100. * batch_idx / len(test_dataset), loss.item(),val_acc/(batch_idx+1)))
 
         epoch_loss_cls /= epoch_size
         epoch_loss_regr /= epoch_size

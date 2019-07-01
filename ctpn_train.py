@@ -1,4 +1,14 @@
-
+#!/usr/bin/env python
+# encoding: utf-8
+'''
+@author: tianxiaomo
+@license: (C) Apache.
+@contact: huguanghao520@gmail.com
+@software: PyCharm
+@file: plt.py
+@time: 2019/6/20 9:43
+@desc:
+'''
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -115,15 +125,18 @@ class ICDARDataset(Dataset):
             fg = np.where(cls[0, :] == 1)[0]
             select_anchor = bbox[fg, :].astype(np.int32)
 
-            img = img.copy()
+            timg = img.copy()
             for p in select_anchor:
-                cv2.rectangle(img, (p[0], p[1]), (p[2], p[3]), color=(0, 0, 255), thickness=2)
+                cv2.rectangle(timg, (p[0], p[1]), (p[2], p[3]), color=(0, 0, 255), thickness=2)
+            plt.imshow(timg[:, :, ::-1])
+            plt.show()
 
+            timg = img.copy()
             fg = np.where(cls[0, :] == 0)[0]
             select_anchor = bbox[fg, :].astype(np.int32)
             for p in select_anchor:
-                cv2.rectangle(img, (p[0], p[1]), (p[2], p[3]), color=(0, 255, 0), thickness=2)
-            plt.imshow(img[:, :, ::-1])
+                cv2.rectangle(timg, (p[0], p[1]), (p[2], p[3]), color=(0, 255, 0), thickness=2)
+            plt.imshow(timg[:, :, ::-1])
             plt.show()
 
         # transform to torch tensor
@@ -286,13 +299,14 @@ np.random.seed(random_seed)
 
 num_workers = 1
 batch_size = num_workers
-gpus = '7'
+gpus = '6'
 epochs = 40
-lr = 1e-3
-opt = 'SGD'
+lr = 1e-5
+opt = 'Adam'
 resume_epoch = 0
-pre_weights = os.path.join(config.checkpoints_dir, 'ctpn_ep11_0.0085_0.0151_0.0236(w-lstm).pth.tar')
+# pre_weights = os.path.join(config.checkpoints_dir, 'ctpn_ep50_0.0075_0.0190_0.0264.pth.tar')
 
+pre_weights = None
 def get_arguments():
     parser = argparse.ArgumentParser(description='Pytorch CTPN For TexT Detection')
     parser.add_argument('--num-workers', type=int, default=num_workers)
@@ -322,12 +336,12 @@ if __name__ == '__main__':
 
     log = init_logger(log_path='logs')
 
-    log.info('opt {},batch{},lr {},gpu:{}'.format(opt,batch_size,lr,gpus))
+    log.info('opt {},batch{},lr {},pretrained {},gpu:{}'.format(opt,batch_size,lr,pre_weights,gpus))
 
     gpus = {i:item for i,item in enumerate(args['gpus'].split(','))}
     os.environ['CUDA_VISIBLE_DEVICES'] = args['gpus']
 
-    checkpoints_weight = args['pretrained_weights']
+    checkpoints_weight = str(args['pretrained_weights'])
 
     dataset = ICDARDataset(args['image_dir'])
     dataloader = DataLoader(dataset, batch_size=args['batch_size'], shuffle=True, num_workers=args['num_workers'],collate_fn=collate)
@@ -359,9 +373,9 @@ if __name__ == '__main__':
     best_loss,best_loss_cls,best_loss_regr = 100,100,100
     best_model = None
     epochs += resume_epoch
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
-    via = False
+    via = True
 
     for epoch in range(resume_epoch+1, epochs):
         log.info(f'Epoch {epoch}/{epochs}')
@@ -381,37 +395,6 @@ if __name__ == '__main__':
                 optimizer.zero_grad()
 
                 out_cls, out_regr = model(imgs)
-
-                # if via:
-                #     cls_prob = F.softmax(out_cls.data, dim=-1).cpu().numpy()
-                #     regr = out_regr.data.cpu().numpy()
-                #     anchor = gen_anchor((int(1024 / 16), int(1024 / 16)), 16)
-                #     bbox = bbox_transfor_inv(anchor, regr)
-                #     bbox = clip_box(bbox, [1024, 1024])
-                #
-                #     fg = np.where(cls_prob[0, :, 1] > 0.7)[0]
-                #     select_anchor = bbox[fg, :].astype(np.int32)
-                #
-                #     img = (imgs[0].data.cpu().permute(1,2,0).numpy().copy() + IMAGE_MEAN).astype(np.uint8)
-                #     for p in select_anchor:
-                #         cv2.rectangle(img, (p[0], p[1]), (p[2], p[3]), color=(0, 0, 255), thickness=2)
-                #     plt.imshow(img[:,:,::-1])
-                #     plt.show()
-                #
-                #     cls_prob = clss.data.cpu().numpy()
-                #     regr = regrs.data.cpu().numpy()
-                #     anchor = gen_anchor((int(1024 / 16), int(1024 / 16)), 16)
-                #     bbox = bbox_transfor_inv(anchor, regr)
-                #     bbox = clip_box(bbox, [1024, 1024])
-                #
-                #     fg = np.where(cls_prob[0, 0, :] > 0.7)[0]
-                #     select_anchor = bbox[fg, :].astype(np.int32)
-                #
-                #     img = (imgs[0].data.cpu().permute(1,2,0).numpy().copy() + IMAGE_MEAN).astype(np.uint8)
-                #     for p in select_anchor:
-                #         cv2.rectangle(img, (p[0], p[1]), (p[2], p[3]), color=(0, 0, 255), thickness=2)
-                #     plt.imshow(img[:,:,::-1])
-                #     plt.show()
 
                 loss_cls = critetion_cls(out_cls, clss)
                 loss_regr = critetion_regr(out_regr, regrs,w_in,w_out)
@@ -435,7 +418,8 @@ if __name__ == '__main__':
         epoch_loss_cls /= epoch_size
         epoch_loss_regr /= epoch_size
         epoch_loss /= epoch_size
-        log.info(f'Epoch:{epoch}--{epoch_loss_cls:.4f}--{epoch_loss_regr:.4f}--{epoch_loss:.4f}')
+        log.info(f'Epoch:{epoch}--{epoch_loss_cls:.4f}--{epoch_loss_regr:.4f}--{epoch_loss:.4f}' + '--lr:{0}'.format(optimizer.param_groups[0]['lr']))
+        # log.info(f'Epoch:{epoch}--{epoch_loss_cls:.4f}--{epoch_loss_regr:.4f}--{epoch_loss:.4f}---{optimizer.param_groups[1]['lr']:.6f}')
         if best_loss_cls > epoch_loss_cls or best_loss_regr > epoch_loss_regr or best_loss > epoch_loss:
             best_loss = epoch_loss
             best_loss_regr = epoch_loss_regr

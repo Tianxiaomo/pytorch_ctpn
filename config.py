@@ -1,4 +1,14 @@
-
+#!/usr/bin/env python
+# encoding: utf-8
+'''
+@author: tianxiaomo
+@license: (C) Apache.
+@contact: huguanghao520@gmail.com
+@software: PyCharm
+@file: plt.py
+@time: 2019/6/20 10:03
+@desc:
+'''
 import os
 
 # base_dir = 'path to dataset base dir'

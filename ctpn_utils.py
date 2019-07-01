@@ -1,4 +1,14 @@
-
+#!/usr/bin/env python
+# encoding: utf-8
+'''
+@author: tianxiaomo
+@license: (C) Apache.
+@contact: huguanghao520@gmail.com
+@software: PyCharm
+@file: plt.py
+@time: 2019/6/20 10:21
+@desc:
+'''
 import numpy as np
 import cv2
 from config import *
@@ -13,6 +23,7 @@ import numpy.random as npr
 def get_date_str():
     now = datetime.datetime.now()
     return now.strftime('%Y-%m-%d_%H-%M-%S')
+
 
 def init_logger(log_file=None, log_path=None, log_level=logging.DEBUG, mode='w', stdout=True):
     """
@@ -63,11 +74,13 @@ def resize(image, width=None, height=None, inter=cv2.INTER_AREA):
         dim = (int(w * r), height)
 
     # otherwise, the height is None
-    else:
+    elif height is None:
         # calculate the ratio of the width and construct the
         # dimensions
         r = width / float(w)
         dim = (width, int(h * r))
+    else:
+        dim = (width,height)
 
     # resize the image
     resized = cv2.resize(image, dim, interpolation=inter)
@@ -481,7 +494,6 @@ def cal_rpn(imgsize, featuresize, scale, gtboxes):
         bbox_outside_weights = np.zeros((base_anchor.shape[0], 2), dtype = np.float32)
 
         return [labels, bbox_targets], base_anchor,[bbox_inside_weights,bbox_outside_weights]
-
 
 
 def nms(dets, thresh):

@@ -1,4 +1,14 @@
-
+#!/usr/bin/env python
+# encoding: utf-8
+'''
+@author: tianxiaomo
+@license: (C) Apache.
+@contact: huguanghao520@gmail.com
+@software: PyCharm
+@file: plt.py
+@time: 2019/6/20 14:21
+@desc:
+'''
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 import cv2
@@ -18,8 +28,9 @@ import config
 prob_thresh = 0.7
 width = 1024
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-weights = os.path.join(config.checkpoints_dir, 'ctpn_ep50_0.0075_0.0190_0.0264.pth.tar')
-img_path = '/home/OCR/icdar2017/train/image_1.jpg'
+weights = os.path.join(config.checkpoints_dir, 'ctpn_ep28_0.0084_0.0142_0.0226.pth.tar')
+# img_path = '/home/OCR/icdar2017/train/image_7.jpg'
+img_path = '/mnt/f/Data/icdar2017rctw_train_v1.2/train/part1/image_0.jpg'
 
 class BasicConv(nn.Module):
     def __init__(self,
@@ -90,21 +101,23 @@ class CTPN_Model(nn.Module):
         return cls, regr
 
 
+image = cv2.imread(img_path)
+image = resize(image, width=width,height=width)
+image_c = image.copy()
+h, w = image.shape[:2]
+image = image.astype(np.float32) - config.IMAGE_MEAN
+image = torch.from_numpy(image.transpose(2, 0, 1)).unsqueeze(0).float()
+
+
 model = CTPN_Model()
 model.load_state_dict(torch.load(weights, map_location=device)['model_state_dict'],strict=False)
 model.to(device)
 model.eval()
 
 def dis(image):
-    plt.imshow(image)
+    plt.imshow(image[:,:,::-1])
     plt.show()
 
-image = cv2.imread(img_path)
-image = resize(image, width=width)
-image_c = image.copy()
-h, w = image.shape[:2]
-image = image.astype(np.float32) - config.IMAGE_MEAN
-image = torch.from_numpy(image.transpose(2, 0, 1)).unsqueeze(0).float()
 
 with torch.no_grad():
     image = image.to(device)
